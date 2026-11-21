@@ -17,7 +17,6 @@ export default {
       });
     }
 
-    // Optional access PIN check (set ACCESS_PIN in Cloudflare Variables if you want to restrict access)
     if (env.ACCESS_PIN) {
       const providedPin = request.headers.get("X-Access-Pin") || "";
       if (providedPin !== env.ACCESS_PIN) {
@@ -28,15 +27,15 @@ export default {
       }
     }
 
-    if (!env.GEMINI_API_KEY) {
-      return new Response(JSON.stringify({ error: "Server missing GEMINI_API_KEY secret" }), {
+    if (!env.AI) {
+      return new Response(JSON.stringify({ error: "Workers AI binding (AI) is not configured" }), {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
     try {
-      const { model = "gemini-3.8-flash", prompt } = await request.json();
+      const { model = "fast", prompt } = await request.json();
       if (!prompt) {
         return new Response(JSON.stringify({ error: "Missing prompt" }), {
           status: 400,
@@ -44,25 +43,33 @@ export default {
         });
       }
 
-      const safeModel = /^gemini-[a-zA-Z0-9._-]+$/.test(model) ? model : "gemini-3.8-flash";
+      const cfModel = model.includes("pro")
+        ? "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+        : "@cf/meta/llama-3.1-8b-instruct-fast";
 
-      const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(safeModel)}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
+      const aiRes = await env.AI.run(cfModel, {
+        messages: [
+          {
+            role: "system",
+            content: "You are a helpful assistant that produces clean, accurate, well-structured Markdown summaries of WhatsApp chat exports.",
+          },
+          { role: "user", content: prompt },
+        ],
+        max_tokens: 2048,
+      });
 
-      const geminiRes = await fetch(geminiUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
+      const text = aiRes?.response || "";
+      return new Response(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text }] } }],
         }),
-      });
-
-      const data = await geminiRes.json();
-      return new Response(JSON.stringify(data), {
-        status: geminiRes.status,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+        {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        }
+      );
     } catch (err) {
-      return new Response(JSON.stringify({ error: err.message || "Proxy error" }), {
+      return new Response(JSON.stringify({ error: err.message || "AI inference error" }), {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
