@@ -36,7 +36,7 @@ export default {
     }
 
     try {
-      const { model = "gemini-2.5-flash", prompt } = await request.json();
+      const { model = "gemini-3.8-flash", prompt } = await request.json();
       if (!prompt) {
         return new Response(JSON.stringify({ error: "Missing prompt" }), {
           status: 400,
@@ -44,8 +44,7 @@ export default {
         });
       }
 
-      const allowedModels = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"];
-      const safeModel = allowedModels.includes(model) ? model : "gemini-2.5-flash";
+      const safeModel = /^gemini-[a-zA-Z0-9._-]+$/.test(model) ? model : "gemini-3.8-flash";
 
       const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(safeModel)}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
 
