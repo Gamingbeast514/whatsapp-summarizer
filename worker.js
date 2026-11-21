@@ -43,19 +43,19 @@ export default {
         });
       }
 
-      const cfModel = model.includes("pro")
-        ? "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
-        : "@cf/meta/llama-3.1-8b-instruct-fast";
+      const cfModel = model === "fast"
+        ? "@cf/meta/llama-3.1-8b-instruct-fast"
+        : "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
       const aiRes = await env.AI.run(cfModel, {
         messages: [
           {
             role: "system",
-            content: "You are a helpful assistant that produces clean, accurate, well-structured Markdown summaries of WhatsApp chat exports.",
+            content: "You are an expert analyst. Produce thorough, specific, well-structured Markdown summaries of WhatsApp chats. Preserve exact project names, people's names, dates, links, and technical details. Translate any Roman Urdu/Hindi into clear English. Never be vague or repetitive.",
           },
           { role: "user", content: prompt },
         ],
-        max_tokens: 2048,
+        max_tokens: 4096,
       });
 
       const text = aiRes?.response || "";

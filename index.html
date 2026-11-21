@@ -293,14 +293,16 @@
         <div>
           <label for="model">AI Model</label>
           <select id="model">
+            <option value="pro">Detailed (Llama 3.3 70B — Recommended)</option>
             <option value="fast">Fast (Llama 3.1 8B)</option>
-            <option value="pro">Detailed (Llama 3.3 70B)</option>
           </select>
         </div>
         <div>
           <label for="style">Summary Format</label>
           <select id="style">
-            <option value="executive">Executive &amp; Project Summary (Structured)</option>
+            <option value="monthly">Monthly Breakdown (Detailed)</option>
+            <option value="weekly">Weekly Breakdown (Detailed)</option>
+            <option value="executive">Executive &amp; Project Summary (Single Pass)</option>
             <option value="actions">Action Items, Decisions &amp; Open Issues</option>
             <option value="timeline">Chronological Timeline</option>
             <option value="custom">Custom Instructions</option>
@@ -444,8 +446,111 @@
       }
     }
 
-    function getPromptInstruction() {
+    function parseDateFromLine(line) {
+      const m = line.match(/^\[?(\d{1,2})\/(\d{1,2})\/(\d{2,4}),\s+\d{1,2}:\d{2}/);
+      if (!m) return null;
+      let a = parseInt(m[1], 10);
+      let b = parseInt(m[2], 10);
+      let y = parseInt(m[3], 10);
+      if (y < 100) y += 2000;
+      // WhatsApp exports on US/Android typically use M/D/YY; if first number > 12 it's D/M/YY
+      let month = a, day = b;
+      if (a > 12) { day = a; month = b; }
+      return new Date(y, month - 1, day);
+    }
+
+    function getGroupKey(date, mode) {
+      const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+      if (mode === 'monthly') {
+        return {
+          id: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`,
+          label: `${months[date.getMonth()]} ${date.getFullYear()}`
+        };
+      }
+      // Weekly: start of week (Monday)
+      const d = new Date(date);
+      const day = d.getDay();
+      const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+      d.setDate(diff);
+      return {
+        id: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`,
+        label: `Week of ${months[d.getMonth()].slice(0, 3)} ${d.getDate()}, ${d.getFullYear()}`
+      };
+    }
+
+    function groupChatByPeriod(chatText, mode) {
+      const lines = chatText.split(/\r?\n/);
+      const groups = new Map();
+      let currentKey = { id: '0000-00', label: 'General / Undated' };
+
+      for (const line of lines) {
+        const dt = parseDateFromLine(line);
+        if (dt && !isNaN(dt.getTime())) {
+          currentKey = getGroupKey(dt, mode);
+        }
+        if (!groups.has(currentKey.id)) {
+          groups.set(currentKey.id, { label: currentKey.label, lines: [] });
+        }
+        groups.get(currentKey.id).lines.push(line);
+      }
+
+      // Drop empty/system-only undated header if real dated groups exist
+      if (groups.size > 1 && groups.has('0000-00') && groups.get('0000-00').lines.length <= 2) {
+        groups.delete('0000-00');
+      }
+
+      return Array.from(groups.values()).map(g => ({
+        label: g.label,
+        text: g.lines.join('\n')
+      }));
+    }
+
+    function splitIntoChunks(text, maxChars = 18000) {
+      if (text.length <= maxChars) return [text];
+      const lines = text.split('\n');
+      const chunks = [];
+      let current = '';
+      for (const line of lines) {
+        if (current.length + line.length + 1 > maxChars && current.length > 0) {
+          chunks.push(current);
+          current = line;
+        } else {
+          current += (current ? '\n' : '') + line;
+        }
+      }
+      if (current) chunks.push(current);
+      return chunks;
+    }
+
+    async function callWorker(model, prompt, headers) {
+      const response = await fetch(WORKER_URL, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ model, prompt })
+      });
+      const data = await response.json();
+      if (response.status === 401) {
+        pinWrap.style.display = 'block';
+        throw new Error(data.error || 'Access PIN required.');
+      }
+      if (!response.ok) {
+        throw new Error(data.error?.message || data.error || `API Error (${response.status})`);
+      }
+      const markdown = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!markdown) throw new Error('No summary returned by the model.');
+      return markdown;
+    }
+
+    function getPromptInstruction(periodLabel) {
       const style = styleEl.value;
+      if (style === 'monthly' || style === 'weekly') {
+        return `Summarize the WhatsApp messages for **${periodLabel}** in detail.
+Include specific bullet points covering:
+- **Projects, Builds & Tasks** (exact names, bugs, deliverables, status)
+- **Decisions, Action Items & Blockers** (who is responsible)
+- **Links, Files & HR/Team Updates**
+Be specific and thorough—do not generalize. Translate any Roman Urdu/Hindi into clear English while preserving exact names, numbers, and dates.`;
+      }
       if (style === 'executive') {
         return `Provide a clear, well-structured Markdown summary of this WhatsApp chat. Include:
 1. **Overview** (participants, date range, overall purpose)
@@ -475,42 +580,53 @@ Translate any Roman Urdu/Hindi into clear English while preserving exact names, 
       }
 
       summarizeBtn.disabled = true;
-      summarizeBtn.textContent = 'Summarizing...';
+      summarizeBtn.textContent = 'Preparing...';
 
       try {
         const model = modelEl.value;
-        const instruction = getPromptInstruction();
+        const style = styleEl.value;
         const headers = { 'Content-Type': 'application/json' };
         const pin = accessPinEl.value.trim();
         if (pin) headers['X-Access-Pin'] = pin;
 
-        const response = await fetch(WORKER_URL, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            model,
-            prompt: `${instruction}\n\n---\nWHATSAPP CHAT:\n${chatText}`
-          })
-        });
+        if (style === 'monthly' || style === 'weekly') {
+          const groups = groupChatByPeriod(chatText, style);
+          const sections = [`# ${style === 'monthly' ? 'Monthly' : 'Weekly'} WhatsApp Chat Summary\n\n*Total periods covered: ${groups.length}*\n`];
+          outputCard.style.display = 'block';
 
-        const data = await response.json();
-        if (response.status === 401) {
-          pinWrap.style.display = 'block';
-          throw new Error(data.error || 'Access PIN required.');
+          for (let i = 0; i < groups.length; i++) {
+            const group = groups[i];
+            summarizeBtn.textContent = `Summarizing ${group.label} (${i + 1}/${groups.length})...`;
+            const chunks = splitIntoChunks(group.text, 18000);
+            const periodParts = [];
+            for (let c = 0; c < chunks.length; c++) {
+              const partLabel = chunks.length > 1 ? `${group.label} (Part ${c + 1}/${chunks.length})` : group.label;
+              const instruction = getPromptInstruction(partLabel);
+              const md = await callWorker(model, `${instruction}\n\n---\nWHATSAPP CHAT (${partLabel}):\n${chunks[c]}`, headers);
+              periodParts.push(md);
+            }
+            sections.push(`## ${group.label}\n\n${periodParts.join('\n\n')}`);
+            lastMarkdown = sections.join('\n\n---\n\n');
+            outputBody.innerHTML = marked.parse(lastMarkdown);
+          }
+          outputCard.scrollIntoView({ behavior: 'smooth' });
+        } else {
+          summarizeBtn.textContent = 'Summarizing...';
+          const instruction = getPromptInstruction();
+          const chunks = splitIntoChunks(chatText, 18000);
+          const parts = [];
+          for (let c = 0; c < chunks.length; c++) {
+            if (chunks.length > 1) {
+              summarizeBtn.textContent = `Summarizing part ${c + 1}/${chunks.length}...`;
+            }
+            const md = await callWorker(model, `${instruction}\n\n---\nWHATSAPP CHAT:\n${chunks[c]}`, headers);
+            parts.push(md);
+          }
+          lastMarkdown = parts.join('\n\n---\n\n');
+          outputBody.innerHTML = marked.parse(lastMarkdown);
+          outputCard.style.display = 'block';
+          outputCard.scrollIntoView({ behavior: 'smooth' });
         }
-        if (!response.ok) {
-          throw new Error(data.error?.message || data.error || `API Error (${response.status})`);
-        }
-
-        const markdown = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!markdown) {
-          throw new Error('No summary returned by the model.');
-        }
-
-        lastMarkdown = markdown;
-        outputBody.innerHTML = marked.parse(markdown);
-        outputCard.style.display = 'block';
-        outputCard.scrollIntoView({ behavior: 'smooth' });
       } catch (err) {
         showError(err.message);
       } finally {
